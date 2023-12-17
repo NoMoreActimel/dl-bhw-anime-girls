@@ -154,7 +154,7 @@ class UNet(nn.Module):
     def __init__(self, image_channels = 3, n_channels = 64,
                  ch_mults = (1, 2, 2, 4),
                  is_attn = (False, False, True, True),
-                 n_blocks = 2):
+                 n_blocks = 2, **kwargs):
         super().__init__()
 
         n_resolutions = len(ch_mults)

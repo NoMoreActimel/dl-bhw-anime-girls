@@ -1,13 +1,16 @@
 {
-  "name": "shw_unet_on_animefaces",
+  "name": "diffusion_on_animefaces",
+  "model_type": "DCGAN",
   "n_gpu": 1,
   "preprocessing": {},
-  "diffusion": {
-    "n_timesteps": 100,
-    "schedule_type": "linear"
-  },
   "model": {
-    "time_emb_dim": 128
+    "type": "DCGAN",
+    "args": {
+      "latent_channels": 128,
+      "hidden_channels": 512,
+      "n_image_channels": 3,
+      "image_size": 64
+    }
   },
   "data": {
     "train": {
@@ -67,7 +70,7 @@
     "early_stop": 100,
     "visualize": "wandb",
     "wandb_project": "dl-hse-bhw-anime-faces",
-    "wandb_run_name": "test-run, UNet from shw-5",
+    "wandb_run_name": "DCGAN test-run",
     "len_epoch": 1000,
     "grad_norm_clip": 1.0
   }

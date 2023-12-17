@@ -1,0 +1,79 @@
+{
+  "name": "diffusion_on_animefaces",
+  "model_type": "DDPM",
+  "n_gpu": 1,
+  "preprocessing": {},
+  "diffusion": {
+    "n_timesteps": 100,
+    "schedule_type": "linear"
+  },
+  "model": {
+    "type": "UNet",
+    "args": {
+      "image_channels": 3,
+      "n_channels": 64
+    }
+  },
+  "data": {
+    "train": {
+      "batch_size": 32,
+      "num_workers": 5,
+      "datasets": [
+        {
+          "type": "AnimeFacesDataset",
+          "args": {
+            "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
+            "val_size": 0.1,
+            "image_reshape_size": [64, 64],
+            "train": true
+          }
+        }
+      ]
+    },
+    "val": {
+      "batch_size": 32,
+      "num_workers": 5,
+      "inference_on_evaluation": true,
+      "inference_indices": [24, 2, 22],
+      "datasets": [
+        {
+          "type": "AnimeFacesDataset",
+          "args": {
+            "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
+            "val_size": 0.1,
+            "image_reshape_size": [64, 64],
+            "train": false
+          }
+        }
+      ]
+    }
+  },
+  "optimizer": {
+    "type": "AdamW",
+    "args": {
+      "lr": 5e-4,
+      "betas": [0.9, 0.95],
+      "weight_decay": 0.1
+    }
+  },
+  "metrics": [],
+  "lr_scheduler": {
+    "type": "ExponentialLR",
+    "args": {
+      "gamma": 1.0
+    }
+  },
+  "trainer": {
+    "epochs": 1000,
+    "save_dir": "saved/",
+    "save_period": 5,
+    "verbosity": 2,
+    "monitor": "min loss",
+    "early_stop": 100,
+    "visualize": "wandb",
+    "wandb_project": "dl-hse-bhw-anime-faces",
+    "wandb_run_name": "DDPM UNet test-run",
+    "len_epoch": 1000,
+    "grad_norm_clip": 1.0
+  }
+}
