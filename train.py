@@ -7,7 +7,7 @@ import torch
 
 import src.metric as module_metric
 
-from src.model import UNet, Diffusion, get_named_beta_schedule
+from src.model import UNet, Diffusion, get_named_beta_schedule, get_number_of_module_parameters
 from src.trainer import Trainer
 from src.utils import prepare_device
 from src.utils.object_loading import get_dataloaders
@@ -41,7 +41,7 @@ def main(config):
     if len(device_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
     
-    print(f"\nNumber of model parameters: {model.get_number_of_parameters()}\n")
+    print(f"\nNumber of model parameters: {get_number_of_module_parameters(model)}\n")
 
     schedule_type = config["diffusion"].get("schedule_type", "linear")
     betas = get_named_beta_schedule(schedule_type, T)

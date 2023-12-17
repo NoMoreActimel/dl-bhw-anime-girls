@@ -31,6 +31,7 @@ class AnimeFacesDataset(Dataset):
         self.index = self.create_index()
 
         self.transform = v2.Compose([
+            v2.ToImage(),
             v2.Resize(size=self.image_reshape_size, antialias=True),
             # v2.RandomHorizontalFlip(p=0.5),
             v2.ToDtype(torch.float32, scale=True),
@@ -38,7 +39,7 @@ class AnimeFacesDataset(Dataset):
         ])
     
     def create_index(self):
-        if "train" not in os.listdir(self.data_dir):
+        if self.train:
             self.image_files_list = list(os.listdir(self.data_dir))
             image_files_train, image_files_val = train_test_split(
                 self.image_files_list,
@@ -48,10 +49,13 @@ class AnimeFacesDataset(Dataset):
 
             image_files_dict = {"train": image_files_train, "val": image_files_val}
             for part, files_list in image_files_dict.items():
-                with open(self.data_dir / part, 'w+', encoding='utf-8') as f:
-                    f.writelines(files_list)        
+                with open(self.data_dir / f"{part}.index", 'w+', encoding='utf-8') as f:
+                    f.writelines([file + '\n' for file in files_list])
 
-        index = image_files_dict["train" if self.train else "val"]
+        part = "train" if self.train else "val"
+        with open(self.data_dir / f"{part}.index", 'r', encoding='utf-8') as f:
+            index = [filename.strip() for filename in f.readlines()]
+        
         return index
 
     def __len__(self):

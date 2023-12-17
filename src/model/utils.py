@@ -93,3 +93,9 @@ class FastTensorDataLoader:
 
     def __len__(self):
         return self.n_batches
+
+
+def get_number_of_module_parameters(module):
+    module_parameters = filter(lambda p: p.requires_grad, module.parameters())
+    params = sum([torch.numel(torch.Tensor(p.shape)) for p in module_parameters])
+    return params

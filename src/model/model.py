@@ -1,138 +1,216 @@
+import math
 import torch
-import torch.nn as nn
+from torch import nn
 
-class Block(nn.Module):
-    def __init__(self, shape, in_c, out_c, kernel_size=3, stride=1, padding=1, activation=None, normalize=True):
-        super(Block, self).__init__()
-        self.ln = nn.LayerNorm(shape)
-        self.conv1 = nn.Conv2d(in_c, out_c, kernel_size, stride, padding)
-        self.conv2 = nn.Conv2d(out_c, out_c, kernel_size, stride, padding)
-        self.activation = nn.SiLU() if activation is None else activation
-        self.normalize = normalize
 
+class Swish(nn.Module):
     def forward(self, x):
-        out = self.ln(x) if self.normalize else x
-        out = self.conv1(out)
-        out = self.activation(out)
-        out = self.conv2(out)
-        out = self.activation(out)
-        return out
+        return x * torch.sigmoid(x)
 
-def sinusoidal_embedding(n, d):
-    # Returns the standard positional embedding
-    embedding = torch.tensor([[i / 10_000 ** (2 * j / d) for j in range(d)] for i in range(n)])
-    sin_mask = torch.arange(0, n, 2)
+class TimeEmbedding(nn.Module):
+    def __init__(self, n_channels):
+        super().__init__()
+        self.n_channels = n_channels
+        self.lin1 = nn.Linear(self.n_channels // 4, self.n_channels)
+        self.act = Swish()
+        self.lin2 = nn.Linear(self.n_channels, self.n_channels)
 
-    embedding[sin_mask] = torch.sin(embedding[sin_mask])
-    embedding[1 - sin_mask] = torch.cos(embedding[sin_mask])
+    def forward(self, t):
+        half_dim = self.n_channels // 8
+        emb = math.log(10_000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=1)
 
-    return embedding     
+        emb = self.act(self.lin1(emb))
+        emb = self.lin2(emb)
 
-class UNet(nn.Module):
-    def __init__(self, n_steps=1000, time_emb_dim=128):
-        super(UNet, self).__init__()
+        return emb
 
-        # Sinusoidal embedding
-        self.time_embed = nn.Embedding(n_steps, time_emb_dim)
-        self.time_embed.weight.data = sinusoidal_embedding(n_steps, time_emb_dim)
-        self.time_embed.requires_grad_(False)
 
-        # First half
-        self.te1 = self._make_te(time_emb_dim, 1)
-        self.b1 = nn.Sequential(
-            Block((1, 28, 28), 1, 10),
-            Block((10, 28, 28), 10, 10),
-            Block((10, 28, 28), 10, 10)
-        )
-        self.down1 = nn.Conv2d(10, 10, 4, 2, 1)
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_channels, n_groups=32, dropout=0.1):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(n_groups, in_channels)
+        self.act1 = Swish()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
 
-        self.te2 = self._make_te(time_emb_dim, 10)
-        self.b2 = nn.Sequential(
-            Block((10, 14, 14), 10, 20),
-            Block((20, 14, 14), 20, 20),
-            Block((20, 14, 14), 20, 20)
-        )
-        self.down2 = nn.Conv2d(20, 20, 4, 2, 1)
+        self.norm2 = nn.GroupNorm(n_groups, out_channels)
+        self.act2 = Swish()
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
 
-        self.te3 = self._make_te(time_emb_dim, 20)
-        self.b3 = nn.Sequential(
-            Block((20, 7, 7), 20, 40),
-            Block((40, 7, 7), 40, 40),
-            Block((40, 7, 7), 40, 40)
-        )
-        self.down3 = nn.Sequential(
-            nn.Conv2d(40, 40, 2, 1),
-            nn.SiLU(),
-            nn.Conv2d(40, 40, 4, 2, 1)
-        )
+        if in_channels != out_channels:
+            self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
+        else:
+            self.shortcut = nn.Identity()
 
-        # Bottleneck
-        self.te_mid = self._make_te(time_emb_dim, 40)
-        self.b_mid = nn.Sequential(
-            Block((40, 3, 3), 40, 20),
-            Block((20, 3, 3), 20, 20),
-            Block((20, 3, 3), 20, 40)
-        )
+        self.time_emb = nn.Linear(time_channels, out_channels)
+        self.time_act = Swish()
 
-        # Second half
-        self.up1 = nn.Sequential(
-            nn.ConvTranspose2d(40, 40, 4, 2, 1),
-            nn.SiLU(),
-            nn.ConvTranspose2d(40, 40, 2, 1)
-        )
-
-        self.te4 = self._make_te(time_emb_dim, 80)
-        self.b4 = nn.Sequential(
-            Block((80, 7, 7), 80, 40),
-            Block((40, 7, 7), 40, 20),
-            Block((20, 7, 7), 20, 20)
-        )
-
-        self.up2 = nn.ConvTranspose2d(20, 20, 4, 2, 1)
-        self.te5 = self._make_te(time_emb_dim, 40)
-        self.b5 = nn.Sequential(
-            Block((40, 14, 14), 40, 20),
-            Block((20, 14, 14), 20, 10),
-            Block((10, 14, 14), 10, 10)
-        )
-
-        self.up3 = nn.ConvTranspose2d(10, 10, 4, 2, 1)
-        self.te_out = self._make_te(time_emb_dim, 20)
-        self.b_out = nn.Sequential(
-            Block((20, 28, 28), 20, 10),
-            Block((10, 28, 28), 10, 10),
-            Block((10, 28, 28), 10, 10, normalize=False)
-        )
-
-        self.conv_out = nn.Conv2d(10, 1, 3, 1, 1)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, t):
-        # x is (N, 2, 28, 28) (image with positional embedding stacked on channel dimension)
-        t = self.time_embed(t)
+        h = self.conv1(self.act1(self.norm1(x)))
+        h += self.time_emb(self.time_act(t))[:, :, None, None]
+        h = self.conv2(self.dropout(self.act2(self.norm2(h))))
+        return h + self.shortcut(x)
 
-        n = len(x)
-        out1 = self.b1(x + self.te1(t).reshape(n, -1, 1, 1))  # (N, 10, 28, 28)
-        out2 = self.b2(self.down1(out1) + self.te2(t).reshape(n, -1, 1, 1))  # (N, 20, 14, 14)
-        out3 = self.b3(self.down2(out2) + self.te3(t).reshape(n, -1, 1, 1))  # (N, 40, 7, 7)
 
-        out_mid = self.b_mid(self.down3(out3) + self.te_mid(t).reshape(n, -1, 1, 1))  # (N, 40, 3, 3)
+class AttentionBlock(nn.Module):
+    def __init__(self, n_channels, n_heads=1, d_k=None, n_groups=32):
+        super().__init__()
 
-        out4 = torch.cat((out3, self.up1(out_mid)), dim=1)  # (N, 80, 7, 7)
-        out4 = self.b4(out4 + self.te4(t).reshape(n, -1, 1, 1))  # (N, 20, 7, 7)
+        d_k = n_channels if d_k is None else d_k
+        self.d_k = d_k
+        
+        self.norm = nn.GroupNorm(n_groups, n_channels)
+        self.projection = nn.Linear(n_channels, n_heads * d_k * 3)
+        self.output = nn.Linear(n_heads * d_k, n_channels)
+        self.scale = d_k ** -0.5
+        self.n_heads = n_heads
 
-        out5 = torch.cat((out2, self.up2(out4)), dim=1)  # (N, 40, 14, 14)
-        out5 = self.b5(out5 + self.te5(t).reshape(n, -1, 1, 1))  # (N, 10, 14, 14)
+    def forward(self, x, t=None):
+        batch_size, n_channels, height, width = x.shape
+        
+        x = x.view(batch_size, n_channels, -1).permute(0, 2, 1)
 
-        out = torch.cat((out1, self.up3(out5)), dim=1)  # (N, 20, 28, 28)
-        out = self.b_out(out + self.te_out(t).reshape(n, -1, 1, 1))  # (N, 1, 28, 28)
+        qkv = self.projection(x).view(batch_size, -1, self.n_heads, 3 * self.d_k)
+        q, k, v = torch.chunk(qkv, 3, dim=-1)
 
-        out = self.conv_out(out)
+        attn = torch.einsum('bihd,bjhd->bijh', q, k) * self.scale
+        attn = attn.softmax(dim=2)
+        res = torch.einsum('bijh,bjhd->bihd', attn, v)
 
-        return out
+        res = res.view(batch_size, -1, self.n_heads * self.d_k)
+        res = self.output(res)
+        res += x
 
-    def _make_te(self, dim_in, dim_out):
-        return nn.Sequential(
-            nn.Linear(dim_in, dim_out),
-            nn.SiLU(),
-            nn.Linear(dim_out, dim_out)
-        )
+        res = res.permute(0, 2, 1).view(batch_size, n_channels, height, width)
+
+        return res
+
+
+class DownBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_channels, has_attn):
+        super().__init__()
+        self.res = ResidualBlock(in_channels, out_channels, time_channels)
+        if has_attn:
+            self.attn = AttentionBlock(out_channels)
+        else:
+            self.attn = nn.Identity()
+
+    def forward(self, x, t):
+        x = self.res(x, t)
+        x = self.attn(x)
+        return x
+
+
+class UpBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_channels, has_attn):
+        super().__init__()
+        self.res = ResidualBlock(in_channels + out_channels, out_channels, time_channels)
+        if has_attn:
+            self.attn = AttentionBlock(out_channels)
+        else:
+            self.attn = nn.Identity()
+
+    def forward(self, x, t):
+        x = self.res(x, t)
+        x = self.attn(x)
+        return x
+
+
+class MiddleBlock(nn.Module):
+    def __init__(self, n_channels, time_channels):
+        super().__init__()
+        self.res1 = ResidualBlock(n_channels, n_channels, time_channels)
+        self.attn = AttentionBlock(n_channels)
+        self.res2 = ResidualBlock(n_channels, n_channels, time_channels)
+
+    def forward(self, x, t):
+        x = self.res1(x, t)
+        x = self.attn(x)
+        x = self.res2(x, t)
+        return x
+
+
+class Upsample(nn.Module):
+    def __init__(self, n_channels):
+        super().__init__()
+        self.conv = nn.ConvTranspose2d(n_channels, n_channels, (4, 4), (2, 2), (1, 1))
+
+    def forward(self, x, t):
+        return self.conv(x)
+
+class Downsample(nn.Module):
+    def __init__(self, n_channels):
+        super().__init__()
+        self.conv = nn.Conv2d(n_channels, n_channels, (3, 3), (2, 2), (1, 1))
+
+    def forward(self, x, t):
+        return self.conv(x)
+
+class UNet(nn.Module):
+    def __init__(self, image_channels = 3, n_channels = 64,
+                 ch_mults = (1, 2, 2, 4),
+                 is_attn = (False, False, True, True),
+                 n_blocks = 2):
+        super().__init__()
+
+        n_resolutions = len(ch_mults)
+
+        self.image_proj = nn.Conv2d(image_channels, n_channels, kernel_size=(3, 3), padding=(1, 1))
+        self.time_emb = TimeEmbedding(n_channels * 4)
+
+        down = []
+        out_channels = in_channels = n_channels
+        for i in range(n_resolutions):
+            out_channels = in_channels * ch_mults[i]
+            for _ in range(n_blocks):
+                down.append(DownBlock(in_channels, out_channels, n_channels * 4, is_attn[i]))
+                in_channels = out_channels
+
+            if i < n_resolutions - 1:
+                down.append(Downsample(in_channels))
+
+        self.down = nn.ModuleList(down)
+        self.middle = MiddleBlock(out_channels, n_channels * 4, )
+
+        up = []
+        in_channels = out_channels
+        for i in reversed(range(n_resolutions)):
+            out_channels = in_channels
+            for _ in range(n_blocks):
+                up.append(UpBlock(in_channels, out_channels, n_channels * 4, is_attn[i]))
+
+            out_channels = in_channels // ch_mults[i]
+            up.append(UpBlock(in_channels, out_channels, n_channels * 4, is_attn[i]))
+            in_channels = out_channels
+            if i > 0:
+                up.append(Upsample(in_channels))
+
+        self.up = nn.ModuleList(up)
+        self.norm = nn.GroupNorm(8, n_channels)
+        self.act = Swish()
+        self.final = nn.Conv2d(in_channels, image_channels, kernel_size=(3, 3), padding=(1, 1))
+
+    def forward(self, x, t):
+        t = self.time_emb(t)
+        x = self.image_proj(x)
+        h = [x]
+        
+        for m in self.down:
+            x = m(x, t)
+            h.append(x)
+
+        x = self.middle(x, t)
+
+        for m in self.up:
+            if isinstance(m, Upsample):
+                x = m(x, t)
+            else:
+                s = h.pop()
+                x = torch.cat((x, s), dim=1)
+                x = m(x, t)
+
+        return self.final(self.act(self.norm(x)))

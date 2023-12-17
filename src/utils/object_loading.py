@@ -45,7 +45,7 @@ def get_dataloaders(configs: ConfigParser):
         assert bs <= len(dataset), \
             f"Batch size ({bs}) shouldn't be larger than dataset length ({len(dataset)})"
         
-        collate_obj = CollateClass(pad_id=dataset.pad_id)
+        collate_obj = CollateClass()
     
         # create dataloader
         dataloader = DataLoader(
