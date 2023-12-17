@@ -25,7 +25,8 @@
             "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
             "val_size": 0.1,
             "image_reshape_size": [64, 64],
-            "train": true
+            "train": true,
+            "preprocess": true
           }
         }
       ]
@@ -42,7 +43,8 @@
             "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
             "val_size": 0.1,
             "image_reshape_size": [64, 64],
-            "train": false
+            "train": false,
+            "preprocess": true
           }
         }
       ]

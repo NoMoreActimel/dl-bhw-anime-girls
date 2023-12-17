@@ -9,7 +9,7 @@ class DCGANDiscriminator(nn.Module):
 
         # last layer reduces size by the factor of 4, others by 2 
         # image_size = 64  =>  n_layers = 4, channels = hidden_channels // 8
-        n_layers = round(math.log(image_size // 4))
+        n_layers = round(math.log(image_size // 4, 2))
         channels = hidden_channels // (2 ** (n_layers - 1))
 
         # 3 x 64 x 64
@@ -58,7 +58,8 @@ class DCGANDiscriminator(nn.Module):
                     padding = 0,
                     bias = False
                 ),
-                nn.Sigmoid()
+                nn.Sigmoid(),
+                nn.Flatten()
             )
         )
         self.layers = nn.Sequential(*layers_list)

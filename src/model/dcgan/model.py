@@ -21,8 +21,12 @@ class DCGAN(nn.Module):
             image_size=image_size
         )
 
-    def forward(self, batch_size):
-        noise = torch.randn(batch_size, self.latent_channels, 1, 1, device=self.device)
+    def forward(self, batch_size=None, noise=None):
+        if noise is None:
+            noise = torch.randn(
+                batch_size, self.latent_channels, 1, 1,
+                device=next(self.parameters()).device
+            )
         return self.generator(noise)
 
     def discriminate(self, input):

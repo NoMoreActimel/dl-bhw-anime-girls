@@ -20,10 +20,12 @@ class AnimeFacesDataset(Dataset):
                  val_size = 0.1,
                  image_reshape_size = (64, 64),
                  train = True,
+                 preprocess = False,
                  *args,
                  **kwargs):
         
         self.train = train
+        self.preprocess = preprocess
         self.image_reshape_size = image_reshape_size
         self.val_size = val_size
 
@@ -39,10 +41,10 @@ class AnimeFacesDataset(Dataset):
         ])
     
     def create_index(self):
-        if self.train:
-            self.image_files_list = list(os.listdir(self.data_dir))
+        if self.train and self.preprocess:
+            image_files_list = [name for name in os.listdir(self.data_dir) if name[-5:] != "index"]
             image_files_train, image_files_val = train_test_split(
-                self.image_files_list,
+                image_files_list,
                 test_size=self.val_size,
                 random_state=self.TRAIN_VAL_RANDOM_SEED
             )

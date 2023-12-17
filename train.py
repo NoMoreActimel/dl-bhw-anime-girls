@@ -68,7 +68,7 @@ def main(config):
         lr_scheduler = config.init_obj(config["lr_scheduler"], torch.optim.lr_scheduler, optimizer)
     else:
         generator_params = model.generator.parameters()
-        discriminator_params = model.discriminatro.parameters()
+        discriminator_params = model.discriminator.parameters()
 
         optimizer = {
             "generator": config.init_obj(

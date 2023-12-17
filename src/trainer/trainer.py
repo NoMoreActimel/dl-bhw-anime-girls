@@ -38,7 +38,8 @@ class Trainer(BaseTrainer):
             len_val_epoch=None,
             skip_oom=True,
             inference_on_evaluation=False,
-            inference_indices=None
+            inference_indices=None,
+            inference_batch_size=3
     ):
         """
             model_type: str, supported either DCGAN or DDPM
@@ -65,18 +66,18 @@ class Trainer(BaseTrainer):
         self.evaluation_dataloaders = {k: v for k, v in dataloaders.items() if k != "train"}
         self.len_val_epoch = len_val_epoch
         if self.len_val_epoch:
-            self.evaluation_dataloaders = {k: inf_loop(v) for k, v in self.evaluation_dataloaders}
+            self.evaluation_dataloaders = {k: inf_loop(v) for k, v in self.evaluation_dataloaders.items()}
         self.log_step = 50
 
         if self.model_type == "DCGAN":
             obl_train_metrics = [
                 "generator_loss", "discriminator_loss", 
-                "discriminator_real_loss", "discriminator_fake_loss",
+                "real_loss", "gen_loss",
                 "generator_grad_norm", "discriminator_grad_norm"
             ]
             obl_val_metrics = [
                 "generator_loss", "discriminator_loss", 
-                "discriminator_real_loss", "discriminator_fake_loss"
+                "real_loss", "gen_loss"
             ]
         else:
             obl_train_metrics = ["loss", "grad_norm"]
@@ -94,7 +95,16 @@ class Trainer(BaseTrainer):
         self.inference_on_evaluation = inference_on_evaluation
         self.inference_indices = inference_indices
         self.val_dataset = self.val_dataloader.dataset if self.val_dataloader else None
-        self.latent_noise = torch.randn(*self.val_dataset[0].shape, device=self.model.device)
+        
+        if model_type == "DCGAN":
+            self.latent_noise = torch.randn(
+                inference_batch_size, self.model.latent_channels, 1, 1,
+                device=self.device)
+        else:
+            self.latent_noise = torch.randn(
+                inference_batch_size, *self.val_dataset[0].shape,
+                device=self.device
+            )
 
     @staticmethod
     def _compute_on_train(metric):
@@ -232,9 +242,9 @@ class Trainer(BaseTrainer):
 
     def process_batch(self, batch, is_train: bool, metrics_tracker: MetricTracker):
         if self.model_type == "DCGAN":
-            self.process_batch_dcgan(batch, is_train, metrics_tracker)
+            return self.process_batch_dcgan(batch, is_train, metrics_tracker)
         elif self.model_type == "DDPM":
-            self.process_batch_ddpm(batch, is_train, metrics_tracker)
+            return self.process_batch_ddpm(batch, is_train, metrics_tracker)
         else:
             raise NotImplementedError("Only DCGAN and DDPM models are supported!")
     
@@ -260,43 +270,39 @@ class Trainer(BaseTrainer):
 
     def process_batch_dcgan(self, batch, is_train: bool, metrics_tracker: MetricTracker):
         batch = self.move_batch_to_device(batch, self.device)
-        batch["generated"] = self.model(batch["images"].shape[0])
+        batch["generated"] = self.model(batch_size=batch["images"].shape[0])
 
         self.optimizer["discriminator"].zero_grad()
         batch["real_predicts"] = self.model.discriminate(batch["images"])
-        batch["gen_predicts"] = self.model.disctiminate(batch["generated"].detach())
-
-        if not is_train:        
-            for met in self.metrics:
-                metrics_tracker.update(met.name, met(**batch))
-            return batch
+        batch["gen_predicts"] = self.model.discriminate(batch["generated"].detach())
 
         discr_losses = self.criterion.discriminator_loss(**batch)
         discriminator_loss_names = ["discriminator_loss", "real_loss", "gen_loss"]
         for loss_name, loss in zip(discriminator_loss_names, discr_losses):
             batch[loss_name] = loss
-        batch["discriminator_loss"].backward()
-
-        self._clip_grad_norm(self.model.discriminator)
-        discriminator_grad_norm = self.get_grad_norm(self.model.discriminator)
-        self.optimizer["discriminator"].step()
-    
+        
+        if is_train:
+            batch["discriminator_loss"].backward()
+            self._clip_grad_norm(self.model.discriminator)
+            discriminator_grad_norm = self.get_grad_norm(self.model.discriminator)
+            metrics_tracker.update("discriminator_grad_norm", discriminator_grad_norm)
+            self.optimizer["discriminator"].step()
+        
         self.optimizer["generator"].zero_grad()
-        batch["gen_predicts"] = self.model.disctiminate(batch["generated"])
+        batch["gen_predicts"] = self.model.discriminate(batch["generated"])
         batch["generator_loss"] = self.criterion.generator_loss(**batch)
-        batch["generator_loss"].backward()
 
-        self._clip_grad_norm(self.model.generator)
-        generator_grad_norm = self.get_grad_norm(self.generator)
-        self.optimizer["generator"].step()
+        if is_train:
+            batch["generator_loss"].backward()
+            self._clip_grad_norm(self.model.generator)
+            generator_grad_norm = self.get_grad_norm(self.model.generator)
+            metrics_tracker.update("generator_grad_norm", generator_grad_norm)
+            self.optimizer["generator"].step()
 
         metrics_tracker.update("generator_loss", batch["generator_loss"].item())
         for loss_name in discriminator_loss_names:
             metrics_tracker.update(loss_name, batch[loss_name].item())
         
-        metrics_tracker.update("generator_grad_norm", generator_grad_norm)
-        metrics_tracker.update("discriminator_grad_norm", discriminator_grad_norm)
-
         for met in self.metrics:
             metrics_tracker.update(met.name, met(**batch))
 
@@ -361,7 +367,7 @@ class Trainer(BaseTrainer):
 
     def _log_inference(self):
         if self.model_type == "DCGAN":
-            generated = self.model(self.latent_noise)
+            generated = self.model(noise=self.latent_noise)
             self._log_image(generated, name="generation example")
             return
         
