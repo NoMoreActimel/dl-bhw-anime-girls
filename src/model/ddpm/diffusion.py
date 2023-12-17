@@ -143,12 +143,16 @@ class Diffusion:
         sample = out["mean"] + nonzero_mask * torch.exp(0.5 * out["log_variance"]) * noise
         return {"sample": sample}
 
-    def p_sample_loop(self, model, shape):
+    def p_sample_loop(self, model, shape, noise=None):
         """
         Samples a batch=shape[0] using diffusion model.
         """
 
-        x = torch.randn(*shape, device=model.device)
+        if noise is not None:
+            x = noise
+        else:
+            x = torch.randn(*shape, device=model.device)
+        
         indices = list(range(self.num_timesteps))[::-1]
 
         for i in tqdm(indices):

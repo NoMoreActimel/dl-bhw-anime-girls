@@ -2,57 +2,61 @@ import math
 import torch
 from torch import nn
 
-
-class Swish(nn.Module):
+class SwishActivation(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
+
 
 class TimeEmbedding(nn.Module):
     def __init__(self, n_channels):
         super().__init__()
         self.n_channels = n_channels
-        self.lin1 = nn.Linear(self.n_channels // 4, self.n_channels)
-        self.act = Swish()
-        self.lin2 = nn.Linear(self.n_channels, self.n_channels)
+        self.layers = nn.Sequential(
+            nn.Linear(self.n_channels // 4, self.n_channels),
+            SwishActivation(),
+            nn.Linear(self.n_channels, self.n_channels)
+        )
 
     def forward(self, t):
-        half_dim = self.n_channels // 8
-        emb = math.log(10_000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        embed_dim = self.n_channels // 8
+        emb = math.log(10_000) / (embed_dim - 1)
+        emb = torch.exp(torch.arange(embed_dim, device=t.device) * -emb)
         emb = t[:, None] * emb[None, :]
         emb = torch.cat((emb.sin(), emb.cos()), dim=1)
 
-        emb = self.act(self.lin1(emb))
-        emb = self.lin2(emb)
-
+        emb = self.layers(emb)
         return emb
 
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_channels, n_groups=32, dropout=0.1):
         super().__init__()
-        self.norm1 = nn.GroupNorm(n_groups, in_channels)
-        self.act1 = Swish()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
 
-        self.norm2 = nn.GroupNorm(n_groups, out_channels)
-        self.act2 = Swish()
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
+        self.layers1 = nn.Sequential(
+            nn.GroupNorm(n_groups, in_channels),
+            SwishActivation(),
+            nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
+        )
+        self.layers2 = nn.Sequential(
+            nn.GroupNorm(n_groups, out_channels),
+            SwishActivation(),
+            nn.Dropout(dropout),
+            nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), padding=(1, 1))
+        )
+        self.time_layers = nn.Sequential(
+            SwishActivation(),
+            nn.Linear(time_channels, out_channels)
+        )
 
         if in_channels != out_channels:
             self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
         else:
             self.shortcut = nn.Identity()
 
-        self.time_emb = nn.Linear(time_channels, out_channels)
-        self.time_act = Swish()
-
-        self.dropout = nn.Dropout(dropout)
-
     def forward(self, x, t):
-        h = self.conv1(self.act1(self.norm1(x)))
-        h += self.time_emb(self.time_act(t))[:, :, None, None]
-        h = self.conv2(self.dropout(self.act2(self.norm2(h))))
+        h = self.layers1(x)
+        h = h + self.time_layers(t)[:, :, None, None]
+        h = self.layers2(h)
         return h + self.shortcut(x)
 
 
@@ -72,9 +76,11 @@ class AttentionBlock(nn.Module):
     def forward(self, x, t=None):
         batch_size, n_channels, height, width = x.shape
         
-        x = x.view(batch_size, n_channels, -1).permute(0, 2, 1)
+        x = x.view(batch_size, n_channels, -1).transpose(1, 2)
+        # batch_size x (height * width) x n_channels
 
-        qkv = self.projection(x).view(batch_size, -1, self.n_heads, 3 * self.d_k)
+        qkv = self.projection(x)
+        qkv = qkv.view(batch_size, -1, self.n_heads, 3 * self.d_k)
         q, k, v = torch.chunk(qkv, 3, dim=-1)
 
         attn = torch.einsum('bihd,bjhd->bijh', q, k) * self.scale
@@ -83,9 +89,11 @@ class AttentionBlock(nn.Module):
 
         res = res.view(batch_size, -1, self.n_heads * self.d_k)
         res = self.output(res)
-        res += x
+        res = res + x
 
-        res = res.permute(0, 2, 1).view(batch_size, n_channels, height, width)
+        res = res.transpose(1, 2)
+        # batch_size x n_channels x (height * width)
+        res = res.view(batch_size, n_channels, height, width)
 
         return res
 
@@ -94,31 +102,23 @@ class DownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_channels, has_attn):
         super().__init__()
         self.res = ResidualBlock(in_channels, out_channels, time_channels)
-        if has_attn:
-            self.attn = AttentionBlock(out_channels)
-        else:
-            self.attn = nn.Identity()
+        self.attn = AttentionBlock(out_channels) if has_attn else nn.Identity()
 
     def forward(self, x, t):
         x = self.res(x, t)
         x = self.attn(x)
         return x
-
 
 class UpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_channels, has_attn):
         super().__init__()
         self.res = ResidualBlock(in_channels + out_channels, out_channels, time_channels)
-        if has_attn:
-            self.attn = AttentionBlock(out_channels)
-        else:
-            self.attn = nn.Identity()
+        self.attn = AttentionBlock(out_channels) if has_attn else nn.Identity()
 
     def forward(self, x, t):
         x = self.res(x, t)
         x = self.attn(x)
         return x
-
 
 class MiddleBlock(nn.Module):
     def __init__(self, n_channels, time_channels):
@@ -191,7 +191,7 @@ class UNet(nn.Module):
 
         self.up = nn.ModuleList(up)
         self.norm = nn.GroupNorm(8, n_channels)
-        self.act = Swish()
+        self.act = SwishActivation()
         self.final = nn.Conv2d(in_channels, image_channels, kernel_size=(3, 3), padding=(1, 1))
 
     def forward(self, x, t):
