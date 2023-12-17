@@ -1,0 +1,128 @@
+import argparse
+import collections
+import warnings
+
+import numpy as np
+import torch
+
+import src.metric as module_metric
+import src.model as module_arch
+from src.trainer import Trainer
+from src.utils import prepare_device
+from src.utils.object_loading import get_dataloaders
+from src.utils.parse_config import ConfigParser
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# fix random seeds for reproducibility
+SEED = 123
+torch.manual_seed(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+np.random.seed(SEED)
+
+
+def main(config):
+    logger = config.get_logger("train")
+
+    # setup data_loader instances
+    dataloaders = get_dataloaders(config)
+
+    # build model architecture, then print to console
+    model = module_arch.DecoderModel(
+        config=config.config,
+        dataset=dataloaders["train"].dataset
+    )
+    logger.info(model)
+
+    # prepare for (multi-device) GPU training
+    device, device_ids = prepare_device(config["n_gpu"])
+    model = model.to(device)
+    if len(device_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
+    
+    print(f"\nNumber of model parameters: {model.get_number_of_parameters()}\n")
+
+    # get function handles of loss and metrics
+    pad_id = dataloaders["train"].dataset.pad_id
+    criterion = config.init_obj(config["loss"], torch.nn, ignore_index=pad_id).to(device)
+
+    metrics = [
+        config.init_obj(metric_dict, module_metric)
+        for metric_dict in config["metrics"]
+    ]
+
+    # build optimizer, learning rate scheduler. delete every line containing lr_scheduler for
+    # disabling scheduler
+    params = filter(lambda p: p.requires_grad, model.parameters())
+    optimizer = config.init_obj(config["optimizer"], torch.optim, params)
+    lr_scheduler = config.init_obj(config["lr_scheduler"], torch.optim.lr_scheduler, optimizer)
+
+    inference_on_evaluation = config["data"]["val"]["inference_on_evaluation"]
+    if inference_on_evaluation:
+        inference_indices = config["data"]["val"].get(
+            "inference_indices", None
+        )
+        inference_temperatures = config["data"]["val"].get(
+            "inference_temperatures", None
+        )
+
+        if inference_indices is None:
+            inference_indices = [24, 2, 22]
+        if inference_temperatures is None:
+            inference_temperatures = [1.0]
+
+    trainer = Trainer(
+        model,
+        criterion,
+        metrics,
+        optimizer,
+        config=config,
+        device=device,
+        dataloaders=dataloaders,
+        lr_scheduler=lr_scheduler,
+        len_epoch=config["trainer"].get("len_epoch", None),
+        inference_on_evaluation=inference_on_evaluation,
+        inference_indices=inference_indices,
+        inference_temperatures=inference_temperatures
+    )
+
+    trainer.train()
+
+
+if __name__ == "__main__":
+    args = argparse.ArgumentParser(description="PyTorch Template")
+    args.add_argument(
+        "-c",
+        "--config",
+        default=None,
+        type=str,
+        help="config file path (default: None)",
+    )
+    args.add_argument(
+        "-r",
+        "--resume",
+        default=None,
+        type=str,
+        help="path to latest checkpoint (default: None)",
+    )
+    args.add_argument(
+        "-d",
+        "--device",
+        default=None,
+        type=str,
+        help="indices of GPUs to enable (default: all)",
+    )
+
+    # custom cli options to modify configuration from default values given in json file.
+    CustomArgs = collections.namedtuple("CustomArgs", "flags type target")
+    options = [
+        CustomArgs(
+            ["--lr", "--learning_rate"], type=float, target="optimizer;args;lr"
+        ),
+        CustomArgs(
+            ["--bs", "--batch_size"], type=int, target="data_loader;args;batch_size"
+        ),
+    ]
+    config = ConfigParser.from_args(args, options)
+    main(config)
