@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 import src.metric as module_metric
-import src.model as module_arch
+
+from src.model import UNet, Diffusion, get_named_beta_schedule
 from src.trainer import Trainer
 from src.utils import prepare_device
 from src.utils.object_loading import get_dataloaders
@@ -28,11 +29,10 @@ def main(config):
     # setup data_loader instances
     dataloaders = get_dataloaders(config)
 
+    T = config["diffusion"]["n_timesteps"]
+
     # build model architecture, then print to console
-    model = module_arch.DecoderModel(
-        config=config.config,
-        dataset=dataloaders["train"].dataset
-    )
+    model = UNet(n_steps=T, time_emb_dim=config["model"]["time_emb_dim"])
     logger.info(model)
 
     # prepare for (multi-device) GPU training
@@ -43,37 +43,32 @@ def main(config):
     
     print(f"\nNumber of model parameters: {model.get_number_of_parameters()}\n")
 
-    # get function handles of loss and metrics
-    pad_id = dataloaders["train"].dataset.pad_id
-    criterion = config.init_obj(config["loss"], torch.nn, ignore_index=pad_id).to(device)
+    schedule_type = config["diffusion"].get("schedule_type", "linear")
+    betas = get_named_beta_schedule(schedule_type, T)
+    diffusion = Diffusion(betas=betas, loss_type="mse")
+
+    criterion = None
 
     metrics = [
         config.init_obj(metric_dict, module_metric)
         for metric_dict in config["metrics"]
     ]
 
-    # build optimizer, learning rate scheduler. delete every line containing lr_scheduler for
-    # disabling scheduler
     params = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = config.init_obj(config["optimizer"], torch.optim, params)
     lr_scheduler = config.init_obj(config["lr_scheduler"], torch.optim.lr_scheduler, optimizer)
 
-    inference_on_evaluation = config["data"]["val"]["inference_on_evaluation"]
-    if inference_on_evaluation:
-        inference_indices = config["data"]["val"].get(
-            "inference_indices", None
-        )
-        inference_temperatures = config["data"]["val"].get(
-            "inference_temperatures", None
-        )
-
-        if inference_indices is None:
-            inference_indices = [24, 2, 22]
-        if inference_temperatures is None:
-            inference_temperatures = [1.0]
+    if "val" in config["data"]:
+        inference_on_evaluation = config["data"]["val"].get("inference_on_evaluation", None)
+        if inference_on_evaluation:
+            inference_indices = config["data"]["val"]["inference_indices"]
+    else:
+        inference_on_evaluation = None
+        inference_indices = None
 
     trainer = Trainer(
         model,
+        diffusion,
         criterion,
         metrics,
         optimizer,
@@ -82,9 +77,9 @@ def main(config):
         dataloaders=dataloaders,
         lr_scheduler=lr_scheduler,
         len_epoch=config["trainer"].get("len_epoch", None),
+        len_val_epoch=config["trainer"].get("len_val_epoch", None),
         inference_on_evaluation=inference_on_evaluation,
-        inference_indices=inference_indices,
-        inference_temperatures=inference_temperatures
+        inference_indices=inference_indices
     )
 
     trainer.train()

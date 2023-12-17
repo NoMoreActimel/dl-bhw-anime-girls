@@ -1,68 +1,42 @@
 {
-  "name": "decoder_on_tinystories",
+  "name": "shw_unet_on_animefaces",
   "n_gpu": 1,
   "preprocessing": {},
+  "diffusion": {
+    "n_timesteps": 100,
+    "schedule_type": "linear"
+  },
   "model": {
-      "type": "DecoderModel",
-      "args": {
-          "num_layers": 8,
-          "num_heads": 8,
-          "embed_dim": 512,
-          "feedforward_dim": 2048,
-          "attn_dropout": 0.1,
-          "ff_dropout": 0.1,
-          "use_flash_attention": true,
-          "use_rms_norm": false,
-          "dtype": "bfloat16"
-      }
+    "time_emb_dim": 128
   },
   "data": {
     "train": {
-      "batch_size": 256,
+      "batch_size": 32,
       "num_workers": 5,
       "datasets": [
         {
-          "type": "TinyStoriesDataset",
+          "type": "AnimeFacesDataset",
           "args": {
-            "raw_data_dir": "/home/jupyter/work/resources/tinystories_dataset",
-            "data_dir": "/home/jupyter/work/resources/tinystories_processed",
+            "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
             "val_size": 0.1,
-            "max_length": 256,
-            "max_index_length": 100000000000000,
-            "tokenizer_config": {
-              "vocab_size": 5000,
-              "pad_id": 3,
-              "model_type": "word",
-              "model_prefix_name": "/home/jupyter/work/resources/sentencepiece/sp_word",
-              "normalization_rule_name": "nmt_nfkc"
-            },
+            "image_reshape_size": [64, 64],
             "train": true
           }
         }
       ]
     },
     "val": {
-      "batch_size": 256,
+      "batch_size": 32,
       "num_workers": 5,
       "inference_on_evaluation": true,
       "inference_indices": [24, 2, 22],
-      "inference_temperatures": [0.5, 1.0, 2.0],
       "datasets": [
         {
-          "type": "TinyStoriesDataset",
+          "type": "AnimeFacesDataset",
           "args": {
-            "raw_data_dir": "/home/jupyter/work/resources/tinystories_dataset",
-            "data_dir": "/home/jupyter/work/resources/tinystories_processed",
+            "data_dir": "/home/jupyter/work/resources/animefaces_dataset",
             "val_size": 0.1,
-            "max_length": 256,
-            "max_index_length": 100000,
-            "tokenizer_config": {
-              "vocab_size": 5000,
-              "pad_id": 3,
-              "model_type": "word",
-              "model_prefix_name": "/home/jupyter/work/resources/sentencepiece/sp_word",
-              "normalization_rule_name": "nmt_nfkc"
-            },
+            "image_reshape_size": [64, 64],
             "train": false
           }
         }
@@ -84,10 +58,6 @@
       "gamma": 1.0
     }
   },
-  "loss": {
-    "type": "CrossEntropyLoss",
-    "args": {}
-  },
   "trainer": {
     "epochs": 1000,
     "save_dir": "saved/",
@@ -96,29 +66,9 @@
     "monitor": "min loss",
     "early_stop": 100,
     "visualize": "wandb",
-    "wandb_project": "dl-hse-bhw-Tiny-Stories",
-    "wandb_run_name": "12L-8h-512-Decoder, sp-word",
+    "wandb_project": "dl-hse-bhw-anime-faces",
+    "wandb_run_name": "test-run, UNet from shw-5",
     "len_epoch": 1000,
     "grad_norm_clip": 1.0
   }
 }
-
-
-- Динамика Ланжевена достаточно хорошо покрывает апостериорное распределение, SGD же плохо и коллапсится в модах
-- Да, траектории в динамике Ланжевена иногда перепрыгивают с одной моды на другую, как это видно на графике
-- Дисперсии стох градиентов убывают быстрее, чем дисперсии шума, то есть на достаточно больших эпохах алгоритм больше ориентируется на шум
-
-На разницу между eps = 1e-3 и eps = 1e-4 можно смотреть с двух сторон:
-
-- первый случай очевидно имеет большую длину шага, из-за чего на малом числе запусков точки сильнее скоррелированны
-- с другой стороны, при уменьшении длины шага коэффициент при градиенте затухает быстрее, так что алгоритм больше ориентируется на случайные блуждания
-
-В каком-то смысле эти 2 пункта могут компенсировать друг друга, но всё же поведения алгоритмов при разных eps сильно отличаются.
-
-- Точки достаточно хорошо покрывают апостериорное распределение, eps = 1e-3 выглядит более равномерно, видимо упомянутая скоррелированность для меньших eps даёт кучные результаты, заметные на более низкий плотностях.
-
-- Судя по 5 запускам, на eps = 1e-3 удаётся, на eps = 1e-4 не особо.
-
-- Принимаем практически все точки, так что МХ регуляризация не особо работает. При этом вначале отвергаем какую-то малую долю точек - видимо, в них удалялись от мод из спавнов с низкой плотностью и маленькими градиентами, и из-за этого совместные плотности сильнее изменялись. На меньших величинах шага принимаем и того больше точек, так как те же плотности практически не изменяются.
-
-- Различия между разными длинами шагов описал в начале, думаю, eps = 1e-3 в нашей задаче подходит лучше, особенно если сэмплируем не очень много точек.

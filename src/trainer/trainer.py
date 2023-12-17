@@ -25,6 +25,7 @@ class Trainer(BaseTrainer):
     def __init__(
             self,
             model,
+            diffusion,
             criterion,
             metrics,
             optimizer,
@@ -33,29 +34,33 @@ class Trainer(BaseTrainer):
             dataloaders,
             lr_scheduler=None,
             len_epoch=None,
+            len_val_epoch=None,
             skip_oom=True,
             inference_on_evaluation=False,
-            inference_indices=None,
-            inference_temperatures=[1.0]
+            inference_indices=None
     ):
         super().__init__(
             model, criterion, metrics,
             optimizer, lr_scheduler, config, device
         )
+
+        self.diffusion = diffusion
+
         self.skip_oom = skip_oom
         self.config = config
         self.train_dataloader = dataloaders["train"]
-        self.val_dataloader = dataloaders["val"]
+        self.val_dataloader = dataloaders.get("val", None)
 
         if len_epoch is None:
-            # epoch-based training
             self.len_epoch = len(self.train_dataloader)
         else:
-            # iteration-based training
             self.train_dataloader = inf_loop(self.train_dataloader)
             self.len_epoch = len_epoch
         
         self.evaluation_dataloaders = {k: v for k, v in dataloaders.items() if k != "train"}
+        self.len_val_epoch = len_val_epoch
+        if self.len_val_epoch:
+            self.evaluation_dataloaders = {k: inf_loop(v) for k, v in self.evaluation_dataloaders}
         self.log_step = 50
 
         self.train_metrics = MetricTracker(
@@ -69,20 +74,7 @@ class Trainer(BaseTrainer):
 
         self.inference_on_evaluation = inference_on_evaluation
         self.inference_indices = inference_indices
-        self.inference_temperatures = inference_temperatures
-        self.val_dataset = self.val_dataloader.dataset
-
-        if self.inference_on_evaluation:
-            self.inference_texts = []
-            self.inference_prefixes = []
-
-            for ind in self.inference_indices:
-                text = self.val_dataset.files[ind]
-                # take first sentences of stories as prefixes
-                prefix = text.split('.')[0] + '.'
-
-                self.inference_texts.append(text)
-                self.inference_prefixes.append(prefix)
+        self.val_dataset = self.val_dataloader.dataset if self.val_dataloader else None
 
     @staticmethod
     def _compute_on_train(metric):
@@ -95,7 +87,7 @@ class Trainer(BaseTrainer):
         """
         Move all necessary tensors to the HPU
         """
-        for tensor_for_gpu in ["indices", "lengths"]:
+        for tensor_for_gpu in ["images"]:
             batch[tensor_for_gpu] = batch[tensor_for_gpu].to(device)
         return batch
 
@@ -116,9 +108,7 @@ class Trainer(BaseTrainer):
         self.train_metrics.reset()
         self.writer.add_scalar("epoch", epoch)
 
-        for batch_idx, batch in enumerate(
-                tqdm(self.train_dataloader, desc="train", total=self.len_epoch)
-        ):
+        for batch_idx, batch in enumerate(tqdm(self.train_dataloader, desc="train", total=self.len_epoch)):
             try:
                 batch = self.process_batch(
                     batch,
@@ -180,33 +170,31 @@ class Trainer(BaseTrainer):
         self.model.eval()
         self.evaluation_metrics.reset()
 
+        len_val_epoch = len(dataloader) if self.len_val_epoch is None else self.len_val_epoch
+
         with torch.no_grad():
-            for batch_idx, batch in tqdm(
-                    enumerate(dataloader),
-                    desc=part,
-                    total=len(dataloader),
-            ):
+            for batch_idx, batch in tqdm(enumerate(dataloader), desc=part, total=len_val_epoch):
                 batch = self.process_batch(
                     batch,
                     is_train=False,
                     metrics_tracker=self.evaluation_metrics
                 )
+
+                if batch_idx >= len_val_epoch:
+                    break
             
             self.writer.set_step(epoch * self.len_epoch, part)
             self._log_scalars(self.evaluation_metrics)
         
             if self.inference_on_evaluation:
-                for ind, prefix, orig_text in zip(
-                    self.inference_indices,
-                    self.inference_prefixes,
-                    self.inference_texts
-                ):
-                    for temp in self.inference_temperatures:
-                        text = self.model.inference(prefix=prefix, temp=temp)
-                        self._log_inference_as_table(
-                            epoch, temp, prefix, orig_text, text,
-                            name=f"sample_{ind}"
-                        )
+                for ind in self.infrence_indices:
+                    image = self.val_dataset[ind]
+                    reconstructed = self.diffusion.train_loss(self.model, image)
+                    self._log_image(image, name=f"original_{ind}")
+                    self._log_image(reconstructed, name=f"reconstructed_{ind}")
+                
+                generated = self.diffusion.p_sample_loop(self.model, self.val_dataset[0].shape)
+                self._log_image(generated, name="generation example")
 
         if self.lr_scheduler is not None:
             if not isinstance(self.lr_scheduler, ReduceLROnPlateau):
@@ -218,17 +206,13 @@ class Trainer(BaseTrainer):
         
         return self.evaluation_metrics.result()
 
-
     def process_batch(self, batch, is_train: bool, metrics_tracker: MetricTracker):
         batch = self.move_batch_to_device(batch, self.device)
         if is_train:
             self.optimizer.zero_grad()
         
-#         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-        batch["logits"] = self.model(batch["indices"][:, :-1])
-        batch["loss"] = self.criterion(
-            batch["logits"].transpose(1, 2),
-            batch["indices"][:, 1:]
+        batch["loss"], batch["generated"] = self.diffusion.train_loss(
+            self.model, batch["images"]
         )
 
         if is_train:
@@ -252,24 +236,11 @@ class Trainer(BaseTrainer):
             total = self.len_epoch
         return base.format(current, total, 100.0 * current / total)
 
-    def _log_spectrogram(self, spectrogram_batch, name="spectrogram"):
-        spectrogram = random.choice(spectrogram_batch.cpu())
-        image = PIL.Image.open(plot_spectrogram_to_buf(spectrogram))
-        self.writer.add_image(name, ToTensor()(image))
-
-    def _log_audio(self, audio, name="audio"):
-        sample_rate = self.config["preprocessing"]["mel_spec_config"]["sr"]
-        self.writer.add_audio(name, audio, sample_rate=sample_rate)
-    
     def _log_text(self, text, name="text"):
         self.writer.add_text(name, text)
     
-    def _log_inference_as_table(self, epoch, temp, prefix, orig_text, text, name):
-        self.writer.add_table(
-            table_name=name,
-            data=[epoch, temp, prefix, orig_text, text],
-            columns=["epoch", "temp", "prefix", "original story", "generated story"]
-        )
+    def _log_image(self, image, name="image"):
+        self.writer.add_image(name, image)
 
     @torch.no_grad()
     def get_grad_norm(self, norm_type=2):
