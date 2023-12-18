@@ -3,7 +3,7 @@ import torch
 import piq
 
 from tqdm import tqdm
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, Dataset
 
 import src.model as module_model
 import src.loss as module_loss
@@ -21,6 +21,19 @@ def move_batch_to_device(batch, device: torch.device):
     for tensor_for_gpu in ["images"]:
         batch[tensor_for_gpu] = batch[tensor_for_gpu].to(device)
     return batch
+
+
+class GenDataset(Dataset):
+    def __init__(self, generated):
+        super().__init__()
+        self.generated = generated
+    
+    def __getitem__(self, ind):
+        return self.generated[ind]
+    
+    def __len__(self):
+        return len(self.generated)
+
 
 def run_inference(
         model_type,
@@ -51,11 +64,11 @@ def run_inference(
             ssims.append(piq.ssim(batch["images"], batch["generated"], data_range=1.))
             generated.append(batch["generated"])
 
-    generated = torch.cat(generated)
-    gen_dataset = TensorDataset(generated)
-    gen_dataloader = DataLoader(gen_dataset, collate_fn=lambda x: {"image": x})
 
     if torch.cuda.is_available():
+        gen_dataset = GenDataset(generated)
+        gen_dataloader = DataLoader(gen_dataset, batch_size=1, collate_fn=lambda x: {"images": torch.cat(x)})
+
         fid_metric = piq.FID()
         real_feats = fid_metric.compute_feats(dataloader)
         gen_feats = fid_metric.compute_feats(gen_dataloader)
@@ -64,14 +77,13 @@ def run_inference(
     else:
         print(f"No cuda is available, could not compute FID score")
 
-    ssim = sum(ssims) / len(ssims)
-    print(f"Mean SSIM: {ssim:.4f}")
-
     loss = sum(losses) / len(losses)
     print(f"Mean loss: {loss:.4f}")
-
-
-
+    
+    ssim = sum(ssims) / len(ssims)
+    print(f"Mean SSIM: {ssim:.4f}")
+        
+        
 
 def main(config):
     dataloaders = get_dataloaders(config)
