@@ -1,81 +1,130 @@
+import argparse
 import torch
-import numpy as np
+import piq
 
-from pathlib import Path
+from tqdm import tqdm
+from torch.utils.data import DataLoader, TensorDataset
 
-from utils import get_WaveGlow
-import src.waveglow as waveglow
+import src.model as module_model
+import src.loss as module_loss
+
+from src.model import Diffusion, get_named_beta_schedule, get_number_of_module_parameters
+from src.utils import prepare_device
+from src.utils.object_loading import get_dataloaders
+from src.utils.parse_config import ConfigParser
 
 
 def move_batch_to_device(batch, device: torch.device):
     """
     Move all necessary tensors to the HPU
     """
-    for tensor_for_gpu in [
-        "src_seq", "src_pos", "mel_target", "mel_pos", 
-        "duration_target", "pitch_target", "energy_target"
-    ]:
+    for tensor_for_gpu in ["images"]:
         batch[tensor_for_gpu] = batch[tensor_for_gpu].to(device)
-    
     return batch
 
-
 def run_inference(
+        model_type,
         model,
-        dataset,
-        indices,
-        waveglow_path,
-        dataset_type="train",
-        inference_path="",
-        duration_coeffs=[1.0],
-        pitch_coeffs=[1.0],
-        energy_coeffs=[1.0],
-        epoch=None
-    ):
-    inference_path = Path(inference_path) / dataset_type
-    inference_path.mkdir(exist_ok=True, parents=True)
-
-    inference_paths = [inference_path / f"utterance_{ind}" for ind in indices]
+        criterion,
+        dataloader,
+        diffusion=None):
     
-    for i, path in enumerate(inference_paths):
-        if epoch is not None:
-            inference_paths[i] = path / f"epoch{epoch}"
-        inference_paths[i].mkdir(exist_ok=True, parents=True)
+    losses = []
+    ssims = []
+    generated = []
 
-    WaveGlow = get_WaveGlow(waveglow_path)
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Inferencing on dataloader", total=len(dataloader)):
+            batch = move_batch_to_device(batch)
+            if model_type == "DCGAN":    
+                batch["generated"] = model(batch_size=batch["images"].shape[0])
+                batch["gen_predicts"] = model.discriminate(batch["generated"])
+                batch["loss"] = criterion.generator_loss(**batch)
+            else:
+                batch["loss"], batch["generated"] = diffusion.train_loss(model, batch["images"])
+            
+            losses.append(batch["loss"])
+            ssims.append(piq.ssim(batch["images"], batch["generated"], data_range=1.))
+            generated.append(batch["generated"])
 
-    dataset_items = [dataset[ind] for ind in indices]
-    batch = dataset.collate_fn(dataset_items)
-    batch = move_batch_to_device(batch, device='cuda:0')
+    gen_dataset = TensorDataset(generated)
+    gen_dataloader = DataLoader(gen_dataset, collate_fn=lambda x: {"image": x})
 
-    paths = []
+    fid_metric = piq.FID()
+    real_feats = fid_metric.compute_feats(dataloader)
+    gen_feats = fid_metric.compute_feats(gen_dataloader)
+    fid = fid_metric(real_feats, gen_feats).item()
 
-    for duration_coeff in duration_coeffs:
-        for pitch_coeff in pitch_coeffs:
-            for energy_coeff in energy_coeffs:
-                with torch.no_grad():
-                    print(batch["src_seq"].shape)
-                    print(batch["src_pos"].shape)
-                    output = model.forward(**{
-                        "src_seq": batch["src_seq"],
-                        "src_pos": batch["src_pos"],
-                        "duration_coeff": duration_coeff,
-                        "pitch_coeff": pitch_coeff,
-                        "energy_coeff": energy_coeff
-                    })
-                
-                mel_predicts = output["mel_predict"].transpose(1, 2)
+    print(f"FID: {fid:.4f}")
 
-                for i, (ind, mel_predict) in enumerate(zip(indices, mel_predicts)):
-                    filename =  f"duration={duration_coeff}_pitch={pitch_coeff}_" \
-                                f"energy={energy_coeff}"
+    ssim = sum(ssims) / len(ssims)
+    print(f"Mean SSIM: {ssim:.4f}")
 
-                    np.save(inference_paths[i] / (filename + ".spec"), mel_predict.cpu())
-                    waveglow.inference(
-                        mel_predict.unsqueeze(0),
-                        WaveGlow,
-                        inference_paths[i] / (filename + ".wav")
-                    )
-                    paths.append(path)
+    loss = sum(losses) / len(losses)
+    print(f"Mean loss: {loss:.4f}")
+
+
+
+
+def main(config):
+    dataloaders = get_dataloaders(config)
+
+    model_type = config["model_type"]
+    assert model_type in ["DCGAN", "DDPM"], \
+        f"Only DCGAN or DDPM model_type supported!"
+
+    model = config.init_obj(config["model"], module_model)
+
+    device, device_ids = prepare_device(config["n_gpu"])
+    model = model.to(device)
+    if len(device_ids) > 1:
+        model = torch.nn.DataParallel(model, device_ids=device_ids)
     
-    return paths
+    print(f"\nNumber of model parameters: {get_number_of_module_parameters(model)}\n")
+
+    if model_type == "DDPM":
+        T = config["diffusion"]["n_timesteps"]
+        schedule_type = config["diffusion"].get("schedule_type", "linear")
+        betas = get_named_beta_schedule(schedule_type, T)
+        diffusion = Diffusion(betas=betas, loss_type="mse")
+        criterion = None
+    else:
+        diffusion=None
+        criterion = config.init_obj(config["loss"], module_loss)
+    
+    run_inference(
+        model_type,
+        model,
+        criterion,
+        dataloaders["val"],
+        diffusion
+    )
+
+
+if __name__ == "__main__":
+    args = argparse.ArgumentParser(description="PyTorch Template")
+    args.add_argument(
+        "-c",
+        "--config",
+        default=None,
+        type=str,
+        help="config file path (default: None)",
+    )
+    args.add_argument(
+        "-r",
+        "--resume",
+        default=None,
+        type=str,
+        help="path to latest checkpoint (default: None)",
+    )
+    args.add_argument(
+        "-d",
+        "--device",
+        default=None,
+        type=str,
+        help="indices of GPUs to enable (default: all)",
+    )
+
+    # custom cli options to modify configuration from default values given in json file.
+    config = ConfigParser.from_args(args)
+    main(config)

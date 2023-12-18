@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 SEED = 123
 torch.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True               # <-------------- we have the same batch shapes each iteration
 np.random.seed(SEED)
 
 

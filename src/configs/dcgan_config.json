@@ -96,6 +96,6 @@
     "wandb_project": "dl-hse-bhw-anime-faces",
     "wandb_run_name": "DCGAN test-run",
     "len_epoch": 1000,
-    "grad_norm_clip": 1.0
+    "grad_norm_clip": 10.0
   }
 }
