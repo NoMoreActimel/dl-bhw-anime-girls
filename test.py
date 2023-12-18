@@ -29,33 +29,40 @@ def run_inference(
         dataloader,
         diffusion=None):
     
+    device = next(model.parameters()).device
+    
     losses = []
     ssims = []
     generated = []
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Inferencing on dataloader", total=len(dataloader)):
-            batch = move_batch_to_device(batch)
+            batch = move_batch_to_device(batch, device)
             if model_type == "DCGAN":    
                 batch["generated"] = model(batch_size=batch["images"].shape[0])
                 batch["gen_predicts"] = model.discriminate(batch["generated"])
                 batch["loss"] = criterion.generator_loss(**batch)
             else:
                 batch["loss"], batch["generated"] = diffusion.train_loss(model, batch["images"])
+                
+            batch["generated"] = 0.5 + 0.5 * batch["generated"]
             
             losses.append(batch["loss"])
             ssims.append(piq.ssim(batch["images"], batch["generated"], data_range=1.))
             generated.append(batch["generated"])
 
+    generated = torch.cat(generated)
     gen_dataset = TensorDataset(generated)
     gen_dataloader = DataLoader(gen_dataset, collate_fn=lambda x: {"image": x})
 
-    fid_metric = piq.FID()
-    real_feats = fid_metric.compute_feats(dataloader)
-    gen_feats = fid_metric.compute_feats(gen_dataloader)
-    fid = fid_metric(real_feats, gen_feats).item()
-
-    print(f"FID: {fid:.4f}")
+    if torch.cuda.is_available():
+        fid_metric = piq.FID()
+        real_feats = fid_metric.compute_feats(dataloader)
+        gen_feats = fid_metric.compute_feats(gen_dataloader)
+        fid = fid_metric(real_feats, gen_feats).item()
+        print(f"FID: {fid:.4f}")
+    else:
+        print(f"No cuda is available, could not compute FID score")
 
     ssim = sum(ssims) / len(ssims)
     print(f"Mean SSIM: {ssim:.4f}")
@@ -73,12 +80,21 @@ def main(config):
     assert model_type in ["DCGAN", "DDPM"], \
         f"Only DCGAN or DDPM model_type supported!"
 
-    model = config.init_obj(config["model"], module_model)
+    model = config.init_obj(config["model"], module_model)   
 
     device, device_ids = prepare_device(config["n_gpu"])
     model = model.to(device)
     if len(device_ids) > 1:
         model = torch.nn.DataParallel(model, device_ids=device_ids)
+        
+    checkpoint = torch.load(config.resume, device)
+    if checkpoint["config"]["model"] != config["model"]:
+        print(
+            "Warning: Architecture configuration given in config file is different from that "
+            "of checkpoint. This may yield an exception while state_dict is being loaded."
+        )
+    model.load_state_dict(checkpoint["state_dict"])
+    print("Loaded model from checkpoint!")
     
     print(f"\nNumber of model parameters: {get_number_of_module_parameters(model)}\n")
 

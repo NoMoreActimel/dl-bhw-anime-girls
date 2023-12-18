@@ -1,6 +1,4 @@
-import json
 import os
-import numpy as np
 import torch
 
 from pathlib import Path
@@ -17,6 +15,7 @@ class AnimeFacesDataset(Dataset):
 
     def __init__(self,
                  data_dir,
+                 index_dir=None,
                  val_size = 0.1,
                  image_reshape_size = (64, 64),
                  train = True,
@@ -30,6 +29,7 @@ class AnimeFacesDataset(Dataset):
         self.val_size = val_size
 
         self.data_dir = Path(data_dir)
+        self.index_dir = Path(index_dir) if index_dir else Path(data_dir)
         self.index = self.create_index()
 
         self.transform = v2.Compose([
@@ -51,11 +51,11 @@ class AnimeFacesDataset(Dataset):
 
             image_files_dict = {"train": image_files_train, "val": image_files_val}
             for part, files_list in image_files_dict.items():
-                with open(self.data_dir / f"{part}.index", 'w+', encoding='utf-8') as f:
+                with open(self.index_dir / f"{part}.index", 'w+', encoding='utf-8') as f:
                     f.writelines([file + '\n' for file in files_list])
 
         part = "train" if self.train else "val"
-        with open(self.data_dir / f"{part}.index", 'r', encoding='utf-8') as f:
+        with open(self.index_dir / f"{part}.index", 'r', encoding='utf-8') as f:
             index = [filename.strip() for filename in f.readlines()]
         
         return index
