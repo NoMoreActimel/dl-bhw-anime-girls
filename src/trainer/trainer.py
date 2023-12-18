@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import ReduceLROnPlateau 
 from torchvision.transforms import ToTensor
+from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from src.base import BaseTrainer
@@ -39,7 +40,7 @@ class Trainer(BaseTrainer):
             skip_oom=True,
             inference_on_evaluation=False,
             inference_indices=None,
-            inference_batch_size=3
+            inference_batch_size=64
     ):
         """
             model_type: str, supported either DCGAN or DDPM
@@ -323,7 +324,8 @@ class Trainer(BaseTrainer):
         self.writer.add_text(name, text)
     
     def _log_image(self, image, name="image"):
-        self.writer.add_image(name, image)
+        grid_image = make_grid(image)
+        self.writer.add_image(name, grid_image)
 
     @torch.no_grad()
     def get_grad_norm(self, model, norm_type=2):
